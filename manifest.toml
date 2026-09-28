@@ -1,0 +1,142 @@
+schema_version = 1
+plugin_name = "bulk-rnaseq"
+
+[image]
+reference = "ghcr.io/auto-nomics/autonomics/bulk-rnaseq@sha256:23071886af3864a0338242987980727753923a0a67f362aef7366d1277c39734"
+tag = "1.0.1"
+upstream = "limma 3.66.0 + edgeR 4.8.2 + WGCNA 1.74 (Bioconductor 3.22, layered on autonomics/deseq2 R 4.5.3 base)"
+license = "Artistic-2.0 OR GPL-2.0-or-later"
+
+# Baked-runner family: the image carries /opt/autonomics/limma_voom_runner.R
+# and /opt/autonomics/wgcna_runner.R, and every parameter travels through
+# AUTONOMICS_LIMMA_* / AUTONOMICS_WGCNA_* environment variables, so each
+# command below is interpreter + fixed argv with no script.
+#
+# The legacy Rust validate() rules the v0 DSL cannot express are enforced by
+# the baked runners with the legacy error messages: limma's categorical
+# contrast_levels exactly-two rule and covariate duplicate / reserved-name /
+# R-identifier checks (added in the 1.0.1 rebuild), plus the data-shape
+# checks both runners already carried. The failure point moves from registry
+# build to container start, exactly as in the deseq2/mrpresso/mvmr
+# migrations.
+#
+# List-valued params (contrast_levels, covariates) travel as comma-joined
+# strings: the v0 env renderer space-joins arrays while the runners split on
+# commas (split_csv), so the joined string is byte-identical to the legacy
+# join(",") channel for every legacy-legal input.
+
+[[nodes]]
+kind = "limma_voom"
+desc = "Runs official limma + voom + eBayes in an isolated container."
+doc = """
+Input ports are an integer count matrix and sample metadata. The node
+constructs the requested design formula, applies TMM (or quantile)
+normalization, fits limma::voom + eBayes, optionally contrasts two outcome
+levels, and publishes the top table, voom weights, normalized expression,
+contrast summary and a run report. No reference panel is required.
+"""
+timeout_secs = 3600
+artifact_prefix = "/artifacts/limma_voom"
+
+[nodes.ports]
+inputs = [
+  { type = "file", label = "count_matrix" },
+  { type = "file", label = "sample_metadata" },
+]
+outputs = [
+  { path = "results.tsv", format = "limma_voom_results_tsv" },
+  { path = "voom_weights.tsv", format = "limma_voom_weights_tsv" },
+  { path = "normalized_expression.tsv", format = "limma_voom_normalized_tsv" },
+  { path = "contrast_summary.tsv", format = "limma_voom_contrast_summary_tsv" },
+  { path = "run_report.json", format = "limma_voom_run_report_json" },
+]
+
+[nodes.params]
+outcome_var = { type = "string", doc = "Metadata column holding the outcome; required" }
+contrast_var = { type = "string", doc = "Contrast column; must equal outcome_var in the deterministic first contract" }
+contrast_levels = { type = "string", default = "", doc = "Comma-joined categorical levels as reference,test (e.g. ctrl,case); exactly two entries for categorical outcome, empty for continuous" }
+covariates = { type = "string", default = "", doc = "Comma-joined metadata covariate columns (e.g. batch,sex); simple R identifiers, no duplicates, never the outcome or sample_id; empty means none" }
+outcome_mode = { type = "string", default = "categorical", doc = "categorical or continuous" }
+normalization = { type = "string", default = "tmm", doc = "tmm, quantile, or none" }
+alpha = { type = "number", default = 0.05, exclusive_min = 0.0, exclusive_max = 1.0, doc = "Significance threshold for the top table; strictly between 0 and 1" }
+threads = { type = "int", default = 1, min = 1.0, max = 1.0, doc = "Fixed at 1: the deterministic first contract forbids parallel execution" }
+
+[nodes.command]
+interpreter = "Rscript"
+argv = ["--vanilla", "/opt/autonomics/limma_voom_runner.R"]
+
+[nodes.command.env]
+AUTONOMICS_LIMMA_OUTCOME = "{{ outcome_var }}"
+AUTONOMICS_LIMMA_CONTRAST_VAR = "{{ contrast_var }}"
+AUTONOMICS_LIMMA_CONTRAST_LEVELS = "{{ contrast_levels }}"
+AUTONOMICS_LIMMA_COVARIATES = "{{ covariates }}"
+AUTONOMICS_LIMMA_OUTCOME_MODE = "{{ outcome_mode }}"
+AUTONOMICS_LIMMA_NORMALIZATION = "{{ normalization }}"
+AUTONOMICS_LIMMA_ALPHA = "{{ alpha }}"
+AUTONOMICS_LIMMA_THREADS = "{{ threads }}"
+
+# Legacy DEFAULT_CPUS/MEMORY/PIDS_LIMIT/SHM_SIZE. network/read_only_rootfs/
+# pull_policy keep the hardened defaults (isolated, true, missing), which
+# match the legacy wrapper exactly.
+[nodes.resources]
+cpus = 2.0
+memory = "6Gi"
+pids_limit = 256
+shm_size = "1Gi"
+
+[[nodes]]
+kind = "wgcna"
+desc = "Runs the official WGCNA pipeline in an isolated container."
+doc = """
+Input port 0 is a gene-by-sample expression matrix (genes as rows, samples
+as columns, gene_id as the first column). The legacy wrapper accepted an
+optional second sample-metadata input, but the v0 DSL has no optional-port
+flag, so only the wired expression input is declared; the baked runner
+treats a missing AUTONOMICS_INPUT1 as no metadata and publishes eigengenes
+without covariate columns. The node performs the soft-threshold scan,
+builds the signed adjacency / TOM via WGCNA::blockwiseModules, applies
+dynamic tree cut + merge, computes kME per gene, and emits module
+assignments, module eigengenes, soft-threshold statistics and a run report.
+"""
+timeout_secs = 7200
+artifact_prefix = "/artifacts/wgcna"
+
+[nodes.ports]
+inputs = [{ type = "file", label = "expression_matrix" }]
+outputs = [
+  { path = "soft_threshold.tsv", format = "wgcna_soft_threshold_tsv" },
+  { path = "adjacency_stats.tsv", format = "wgcna_adjacency_stats_tsv" },
+  { path = "tom_stats.tsv", format = "wgcna_tom_stats_tsv" },
+  { path = "modules.tsv", format = "wgcna_modules_tsv" },
+  { path = "module_eigengenes.tsv", format = "wgcna_eigengenes_tsv" },
+  { path = "run_report.json", format = "wgcna_run_report_json" },
+]
+
+[nodes.params]
+network_type = { type = "string", default = "signed", doc = "signed or unsigned" }
+cor = { type = "string", default = "pearson", doc = "pearson or bicor" }
+min_module_size = { type = "int", default = 30, min = 5.0, doc = "Minimum module size for the dynamic tree cut" }
+deep_split = { type = "int", default = 2, min = 0.0, max = 4.0, doc = "Pectinate-tree split sensitivity passed to blockwiseModules" }
+merge_threshold = { type = "number", default = 0.25, exclusive_min = 0.0, exclusive_max = 1.0, doc = "Eigengene merge cut height; strictly between 0 and 1" }
+max_block_size = { type = "int", default = 5000, min = 500.0, doc = "Upper bound on genes per block; keeps memory bounded" }
+threads = { type = "int", default = 1, min = 1.0, doc = "WGCNA worker threads; 1 disables parallel blinding" }
+
+[nodes.command]
+interpreter = "Rscript"
+argv = ["--vanilla", "/opt/autonomics/wgcna_runner.R"]
+
+[nodes.command.env]
+AUTONOMICS_WGCNA_NETWORK_TYPE = "{{ network_type }}"
+AUTONOMICS_WGCNA_COR = "{{ cor }}"
+AUTONOMICS_WGCNA_MIN_MODULE_SIZE = "{{ min_module_size }}"
+AUTONOMICS_WGCNA_DEEP_SPLIT = "{{ deep_split }}"
+AUTONOMICS_WGCNA_MERGE_THRESHOLD = "{{ merge_threshold }}"
+AUTONOMICS_WGCNA_MAX_BLOCK_SIZE = "{{ max_block_size }}"
+AUTONOMICS_WGCNA_THREADS = "{{ threads }}"
+
+# Legacy DEFAULT_CPUS/MEMORY/PIDS_LIMIT/SHM_SIZE.
+[nodes.resources]
+cpus = 4.0
+memory = "12Gi"
+pids_limit = 256
+shm_size = "2Gi"
