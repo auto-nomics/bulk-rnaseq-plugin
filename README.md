@@ -59,7 +59,7 @@ explicitly when reusing local layers during development.
 `manifest.toml` pins the published digest:
 
 Current immutable manifest digest (1.0.1):
-`sha256:23071886af3864a0338242987980727753923a0a67f362aef7366d1277c39734`.
+`sha256:7d4f0ce3b2a12d207927d50d147f63844d05d9b7a005e8626bba4902da25063b`.
 
 ## Migration parity
 
